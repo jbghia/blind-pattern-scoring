@@ -5,8 +5,11 @@ A self-contained Python program for a blinded Monte Carlo analysis of a fixed 4 
 The program asks whether a specified set of numerical relationships occurs more often than expected under a defined randomization model. It estimates:
 
 •	individual pass rates for each property;
+
 •	pairwise co-occurrence rates;
+
 •	the probability that all properties hold simultaneously;
+
 •	a Wilson score 95% confidence interval for the simultaneous result.
 
 Model
