@@ -17,7 +17,9 @@ Model
 The configuration contains:
 
 •	Column A: four fixed values;
+
 •	Column B: a uniformly random permutation of four fixed values;
+
 •	Column C: eight independent uniform draws from {3, 4, 5, 6, 7, 8, 9, 10}.
 
 Rows are formed from corresponding positions in Columns A, B, and C.
