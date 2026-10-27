@@ -1,0 +1,398 @@
+
+#!/usr/bin/env python3
+"""
+Blinded Monte Carlo analysis of a fixed 4 x 3 numerical configuration.
+
+Family B model:
+  - Column A: fixed ordered values.
+  - Column B: uniformly random permutation of its four original values.
+  - Column C: eight independent uniform draws from {3,4,5,6,7,8,9,10}.
+  - Rows are formed from corresponding positions in Columns A, B, and C.
+
+The script estimates:
+  1. Individual pass rates for every property.
+  2. Pairwise co-occurrence rates for every property pair.
+  3. The empirical probability that all properties hold simultaneously.
+  4. A Wilson score confidence interval for the all-properties estimate.
+"""
+
+from __future__ import annotations
+import argparse
+import math
+import random
+from itertools import combinations
+from typing import Callable, Dict, List, Sequence, Tuple
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+COLUMN_A: Tuple[int, ...] = (11, 13, 17, 19)
+COLUMN_B_VALUES: Tuple[int, ...] = (21, 11, 19, 9)
+COLUMN_C_POOL: Tuple[int, ...] = (3, 4, 5, 6, 7, 8, 9, 10)
+
+# Set to True to permute Column A among its four positions as well.
+PERMUTE_COLUMN_A = False
+
+PROPERTY_NAMES = [
+    "P01",
+    "P02",
+    "P03",
+    "P05",
+    "P06",
+    "P07",
+    "P08",
+    "P11",
+    "P12",
+    "P13",
+]
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+def is_arithmetic_progression_unordered(values: Sequence[int]) -> bool:
+    """True if the four values can be reordered into an arithmetic progression."""
+    if len(values) != 4:
+        return False
+    s = sorted(values)
+    return (s[1] - s[0] == s[2] - s[1] == s[3] - s[2])
+
+
+def has_equal_outer_and_middle_sums(values: Sequence[int]) -> bool:
+    """True if first + last equals second + third."""
+    if len(values) != 4:
+        return False
+    return values[0] + values[3] == values[1] + values[2]
+
+
+def wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> Tuple[float, float]:
+    """Wilson score interval for a binomial proportion."""
+    if trials == 0:
+        return (0.0, 1.0)
+    p = successes / trials
+    denom = 1 + z * z / trials
+    centre = (p + z * z / (2 * trials)) / denom
+    half = z * math.sqrt(p * (1 - p) / trials + z * z / (4 * trials * trials)) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+# ---------------------------------------------------------------------------
+# Configuration-dependent helpers
+# ---------------------------------------------------------------------------
+
+def row_sums(a: Sequence[int], b: Sequence[int]) -> List[int]:
+    return [a[i] + b[i] for i in range(4)]
+
+
+def column_c_groups(c: Sequence[int]) -> List[Tuple[int, int]]:
+    return [(c[0], c[1]), (c[2], c[3]), (c[4], c[5]), (c[6], c[7])]
+
+
+def identify_common_and_unique_values(c: Sequence[int]) -> Tuple[int, List[int]] | None:
+    """
+    Return (common value, ordered unique values) if Column C consists of
+    four pairs sharing one common value and four distinct remaining values.
+    """
+    counts: Dict[int, int] = {}
+    for x in c:
+        counts[x] = counts.get(x, 0) + 1
+
+    common_candidates = [v for v, n in counts.items() if n == 4]
+    if len(common_candidates) != 1:
+        return None
+    common = common_candidates[0]
+
+    unique_values = [v for v, n in counts.items() if n == 1]
+    if len(unique_values) != 4:
+        return None
+
+    groups = column_c_groups(c)
+    uniques = []
+    for x, y in groups:
+        if x == common and y != common:
+            uniques.append(y)
+        elif y == common and x != common:
+            uniques.append(x)
+        else:
+            return None
+
+    if len(set(uniques)) != 4:
+        return None
+    return common, uniques
+
+
+# ---------------------------------------------------------------------------
+# Property tests
+# ---------------------------------------------------------------------------
+
+def make_property_tests() -> List[Tuple[str, Callable[[Sequence[int], Sequence[int], Sequence[int]], bool]]]:
+    def p01(a, b, c):
+        return all(x % 2 == 1 for x in a) and all(x % 2 == 1 for x in b)
+
+    def p02(a, b, c):
+        return (
+            a[0] + a[3] == a[1] + a[2]
+            and b[0] + b[3] == b[1] + b[2]
+            and a[0] + a[3] == b[0] + b[3]
+            and a[0] + a[3] == b[1] + b[2]
+        )
+
+    def p03(a, b, c):
+        identified = identify_common_and_unique_values(c)
+        if identified is None:
+            return False
+        _, uniques = identified
+        rs = row_sums(a, b)
+        if not is_arithmetic_progression_unordered(rs):
+            return False
+        combined = [rs[i] + uniques[i] for i in range(4)]
+        if not is_arithmetic_progression_unordered(combined):
+            return False
+        # Both progressions must have the same common difference.
+        rs_sorted = sorted(rs)
+        combined_sorted = sorted(combined)
+        return (rs_sorted[1] - rs_sorted[0]) == (combined_sorted[1] - combined_sorted[0])
+
+    def p05(a, b, c):
+        values = list(a) + list(b)
+        counts: Dict[int, int] = {}
+        for x in values:
+            counts[x] = counts.get(x, 0) + 1
+
+        duplicated = sorted(v for v, n in counts.items() if n == 2)
+        if len(duplicated) != 2:
+            return False
+        if any(n != 1 for n in counts.values() if n != 2):
+            return False
+
+        upper_a, lower_a = a[:2], a[2:]
+        upper_b, lower_b = b[:2], b[2:]
+
+        for d in duplicated:
+            if not (
+                (d in upper_a and d in upper_b and d not in lower_a and d not in lower_b)
+                or (d in lower_a and d in lower_b and d not in upper_a and d not in upper_b)
+            ):
+                return False
+
+        # One duplicated value must be upper-upper and the other lower-lower.
+        upper_doubled = [d for d in duplicated if d in upper_a and d in upper_b]
+        lower_doubled = [d for d in duplicated if d in lower_a and d in lower_b]
+        return len(upper_doubled) == 1 and len(lower_doubled) == 1
+
+    def p06(a, b, c):
+        upper = list(a[:2]) + list(b[:2])
+        lower = list(a[2:]) + list(b[2:])
+
+        def adjusted_quadrant(q: List[int]) -> int | None:
+            counts: Dict[int, int] = {}
+            for x in q:
+                counts[x] = counts.get(x, 0) + 1
+            doubled = [v for v, n in counts.items() if n == 2]
+            if len(doubled) != 1:
+                return None
+            return sum(q) - doubled[0]
+
+        upper_adj = adjusted_quadrant(upper)
+        lower_adj = adjusted_quadrant(lower)
+        if upper_adj is None or lower_adj is None:
+            return False
+        return upper_adj == lower_adj
+
+    def p07(a, b, c):
+        return identify_common_and_unique_values(c) is not None
+
+    def p08(a, b, c):
+        identified = identify_common_and_unique_values(c)
+        if identified is None:
+            return False
+        groups = column_c_groups(c)
+        rs = row_sums(a, b)
+        return all(groups[i][0] * groups[i][1] == rs[i] for i in range(4))
+
+    def p11(a, b, c):
+        identified = identify_common_and_unique_values(c)
+        if identified is None:
+            return False
+        _, uniques = identified
+        total_unique = sum(uniques)
+        return total_unique * 2 == sum(a) and total_unique * 2 == sum(b)
+
+    def p12(a, b, c):
+        identified = identify_common_and_unique_values(c)
+        if identified is None:
+            return False
+        common, uniques = identified
+        differences = [u - common for u in uniques]
+        additions = [u + common for u in uniques]
+        return (
+            is_arithmetic_progression_unordered(differences)
+            and is_arithmetic_progression_unordered(additions)
+        )
+
+    def p13(a, b, c):
+        identified = identify_common_and_unique_values(c)
+        if identified is None:
+            return False
+        common, uniques = identified
+        rs = row_sums(a, b)
+        differences = [u - common for u in uniques]
+        additions = [u + common for u in uniques]
+
+        original_sequences = [list(a), list(b), rs, uniques, differences, additions]
+
+        # Apply the specified alternative row order to every row-indexed sequence.
+        order = (1, 3, 0, 2)  # zero-based equivalent of rows 2, 4, 1, 3
+        reordered_a = [a[i] for i in order]
+        reordered_b = [b[i] for i in order]
+        reordered_rs = [rs[i] for i in order]
+        reordered_uniques = [uniques[i] for i in order]
+        reordered_differences = [differences[i] for i in order]
+        reordered_additions = [additions[i] for i in order]
+
+        reordered_sequences = [
+            reordered_a,
+            reordered_b,
+            reordered_rs,
+            reordered_uniques,
+            reordered_differences,
+            reordered_additions,
+        ]
+
+        return all(
+            has_equal_outer_and_middle_sums(seq)
+            for seq in original_sequences + reordered_sequences
+        )
+
+    return [
+        ("P01", p01),
+        ("P02", p02),
+        ("P03", p03),
+        ("P05", p05),
+        ("P06", p06),
+        ("P07", p07),
+        ("P08", p08),
+        ("P11", p11),
+        ("P12", p12),
+        ("P13", p13),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo experiment
+# ---------------------------------------------------------------------------
+
+def draw_configuration(rng: random.Random) -> Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]:
+    a = tuple(COLUMN_A) if not PERMUTE_COLUMN_A else tuple(rng.sample(COLUMN_A, len(COLUMN_A)))
+    b = tuple(rng.sample(COLUMN_B_VALUES, len(COLUMN_B_VALUES)))
+    c = tuple(rng.choice(COLUMN_C_POOL) for _ in range(8))
+    return a, b, c
+
+
+def run_simulation(trials: int, seed: int) -> Dict[str, object]:
+    rng = random.Random(seed)
+    tests = make_property_tests()
+    test_names = [name for name, _ in tests]
+
+    individual_counts = {name: 0 for name in test_names}
+    pairwise_counts = {pair: 0 for pair in combinations(test_names, 2)}
+    all_pass_count = 0
+
+    for _ in range(trials):
+        a, b, c = draw_configuration(rng)
+        results = {name: test(a, b, c) for name, test in tests}
+
+        for name, passed in results.items():
+            if passed:
+                individual_counts[name] += 1
+
+        passed_names = [name for name in test_names if results[name]]
+        for pair in combinations(passed_names, 2):
+            pairwise_counts[pair] += 1
+
+        if all(results.values()):
+            all_pass_count += 1
+
+    individual_rates = {
+        name: individual_counts[name] / trials for name in test_names
+    }
+    pairwise_rates = {
+        f"{x} & {y}": pairwise_counts[(x, y)] / trials
+        for x, y in combinations(test_names, 2)
+    }
+    all_rate = all_pass_count / trials
+    ci_low, ci_high = wilson_interval(all_pass_count, trials)
+
+    return {
+        "trials": trials,
+        "seed": seed,
+        "individual_counts": individual_counts,
+        "individual_rates": individual_rates,
+        "pairwise_rates": pairwise_rates,
+        "all_pass_count": all_pass_count,
+        "all_pass_rate": all_rate,
+        "all_pass_ci": (ci_low, ci_high),
+    }
+
+
+def print_report(report: Dict[str, object]) -> None:
+    trials = report["trials"]
+    print("Blinded numerical-configuration Monte Carlo report")
+    print(f"Trials: {trials:,}")
+    print(f"Random seed: {report['seed']}")
+    print()
+
+    print("Individual property pass rates")
+    print("-" * 44)
+    print(f"{'Property':<10}{'Passes':>12}{'Rate':>14}")
+    for name in PROPERTY_NAMES:
+        count = report["individual_counts"][name]
+        rate = report["individual_rates"][name]
+        print(f"{name:<10}{count:>12,}{rate:>14.6%}")
+    print()
+
+    print("All-properties result")
+    print("-" * 44)
+    count = report["all_pass_count"]
+    rate = report["all_pass_rate"]
+    low, high = report["all_pass_ci"]
+    print(f"Simultaneous passes: {count:,}")
+    print(f"Estimated probability: {rate:.8%}")
+    print(f"Wilson 95% CI: [{low:.8%}, {high:.8%}]")
+    print()
+
+    print("Pairwise co-occurrence rates")
+    print("-" * 44)
+    for pair, rate in report["pairwise_rates"].items():
+        print(f"{pair:<16}{rate:>14.6%}")
+
+
+def check_reference_configuration() -> None:
+    tests = make_property_tests()
+    a, b, c = COLUMN_A, COLUMN_B_VALUES, (4, 8, 4, 6, 9, 4, 4, 7)
+    print("Reference configuration checks")
+    print("-" * 44)
+    for name, test in tests:
+        print(f"{name:<10}{str(test(a, b, c)):>10}")
+    print()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Monte Carlo analysis of a fixed numerical configuration."
+    )
+    parser.add_argument("--trials", type=int, default=1_000_000)
+    parser.add_argument("--seed", type=int, default=20261027)
+    parser.add_argument("--check-reference", action="store_true")
+    args = parser.parse_args()
+
+    if args.check_reference:
+        check_reference_configuration()
+
+    report = run_simulation(args.trials, args.seed)
+    print_report(report)
+
+
+if __name__ == "__main__":
+    main()
